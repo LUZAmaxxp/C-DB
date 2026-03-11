@@ -638,3 +638,4 @@ int main() {
     DeleteCriticalSection(&db_critical_section);
     return 0;
 }
+//comment

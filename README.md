@@ -91,16 +91,16 @@ So when querying `GET /select/:id`, the server can locate the user index through
 
 ```mermaid
 flowchart TD
-    A[Start search(key)] --> B{Current node is null?}
+    A[Start search for key] --> B{Current node is null?}
     B -->|Yes| X[Return -1 not found]
-    B -->|No| C[Scan keys in node until key <= keys[i]]
+    B -->|No| C[Scan keys in node until key is less than or equal to current key]
 
-    C --> D{key == keys[i]?}
-    D -->|Yes| E[Return values[i] array index]
+    C --> D{Does key equal current key?}
+    D -->|Yes| E[Return mapped array index]
     D -->|No| F{Leaf node?}
 
     F -->|Yes| X
-    F -->|No| G[Recurse into child[i]]
+    F -->|No| G[Recurse into selected child node]
     G --> B
 ```
 
