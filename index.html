@@ -28,8 +28,53 @@
                         <div class="col-md-3">
                             <input type="number" class="form-control" id="insertAge" placeholder="Age" required>
                         </div>
+                        <div class="col-md-3 mt-3 mt-md-0">
+                            <input type="number" class="form-control" id="insertDepartmentId" placeholder="Department ID (optional)">
+                        </div>
                     </div>
                     <button type="submit" class="btn btn-primary mt-3">Insert</button>
+                </form>
+            </div>
+        </div>
+
+        <!-- Departments -->
+        <div class="card mb-4">
+            <div class="card-header">Departments</div>
+            <div class="card-body">
+                <form id="departmentForm" class="mb-3">
+                    <div class="row">
+                        <div class="col-md-5">
+                            <input type="number" class="form-control" id="departmentId" placeholder="Department ID" required>
+                        </div>
+                        <div class="col-md-5 mt-2 mt-md-0">
+                            <input type="text" class="form-control" id="departmentName" placeholder="Department Name" required>
+                        </div>
+                        <div class="col-md-2 mt-2 mt-md-0">
+                            <button type="submit" class="btn btn-success w-100">Save</button>
+                        </div>
+                    </div>
+                </form>
+                <button id="loadDepartmentsBtn" class="btn btn-outline-secondary btn-sm mb-2">Load Departments</button>
+                <ul class="list-group" id="departmentsList"></ul>
+            </div>
+        </div>
+
+        <!-- Assign Department -->
+        <div class="card mb-4">
+            <div class="card-header">Assign User To Department</div>
+            <div class="card-body">
+                <form id="assignDepartmentForm">
+                    <div class="row">
+                        <div class="col-md-5">
+                            <input type="number" class="form-control" id="assignUserId" placeholder="User ID" required>
+                        </div>
+                        <div class="col-md-5 mt-2 mt-md-0">
+                            <input type="number" class="form-control" id="assignDepartmentId" placeholder="Department ID" required>
+                        </div>
+                        <div class="col-md-2 mt-2 mt-md-0">
+                            <button type="submit" class="btn btn-warning w-100">Assign</button>
+                        </div>
+                    </div>
                 </form>
             </div>
         </div>
@@ -76,6 +121,27 @@
             </div>
         </div>
 
+        <!-- Join View -->
+        <div class="card mb-4">
+            <div class="card-header">Join: Users + Departments</div>
+            <div class="card-body">
+                <button id="loadJoinBtn" class="btn btn-dark">Load Joined Data</button>
+                <table class="table table-striped mt-3" id="joinTable">
+                    <thead>
+                        <tr>
+                            <th>User ID</th>
+                            <th>Name</th>
+                            <th>Email</th>
+                            <th>Age</th>
+                            <th>Department ID</th>
+                            <th>Department Name</th>
+                        </tr>
+                    </thead>
+                    <tbody></tbody>
+                </table>
+            </div>
+        </div>
+
         <!-- Messages -->
         <div id="messages"></div>
     </div>
@@ -85,6 +151,12 @@
         const selectAllBtn = document.getElementById('selectAllBtn');
         const selectByIdBtn = document.getElementById('selectByIdBtn');
         const deleteBtn = document.getElementById('deleteBtn');
+        const departmentForm = document.getElementById('departmentForm');
+        const loadDepartmentsBtn = document.getElementById('loadDepartmentsBtn');
+        const departmentsList = document.getElementById('departmentsList');
+        const assignDepartmentForm = document.getElementById('assignDepartmentForm');
+        const loadJoinBtn = document.getElementById('loadJoinBtn');
+        const joinTableBody = document.querySelector('#joinTable tbody');
         const recordsTableBody = document.querySelector('#recordsTable tbody');
         const selectedRecordDiv = document.getElementById('selectedRecord');
         const messagesDiv = document.getElementById('messages');
@@ -100,8 +172,9 @@
             const name = document.getElementById('insertName').value;
             const email = document.getElementById('insertEmail').value;
             const age = document.getElementById('insertAge').value;
+            const departmentId = document.getElementById('insertDepartmentId').value;
 
-            const data = `id=${id}&name=${encodeURIComponent(name)}&email=${encodeURIComponent(email)}&age=${age}`;
+            const data = `id=${id}&name=${encodeURIComponent(name)}&email=${encodeURIComponent(email)}&age=${age}&department_id=${departmentId || -1}`;
             try {
                 const response = await fetch('http://127.0.0.1:8080/insert', {
                     method: 'POST',
@@ -147,6 +220,7 @@
                                 <p>Name: ${record.name}</p>
                                 <p>Email: ${record.email}</p>
                                 <p>Age: ${record.age}</p>
+                                <p>Department: ${record.department_name} (${record.department_id})</p>
                             </div>
                         </div>
                     `;
@@ -168,6 +242,79 @@
                 if (data.success) document.getElementById('deleteId').value = '';
             } catch (error) {
                 showMessage('Error deleting record', 'danger');
+            }
+        });
+
+        departmentForm.addEventListener('submit', async (e) => {
+            e.preventDefault();
+            const id = document.getElementById('departmentId').value;
+            const name = document.getElementById('departmentName').value;
+            const payload = `id=${id}&name=${encodeURIComponent(name)}`;
+
+            try {
+                const response = await fetch('http://127.0.0.1:8080/insert-department', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                    body: payload
+                });
+                const data = await response.json();
+                showMessage(data.message, data.success ? 'success' : 'danger');
+                if (data.success) {
+                    departmentForm.reset();
+                }
+            } catch (error) {
+                showMessage('Error saving department', 'danger');
+            }
+        });
+
+        loadDepartmentsBtn.addEventListener('click', async () => {
+            try {
+                const response = await fetch('http://127.0.0.1:8080/departments');
+                const departments = await response.json();
+                departmentsList.innerHTML = departments.map(d => `<li class="list-group-item">${d.id} - ${d.name}</li>`).join('');
+            } catch (error) {
+                showMessage('Error loading departments', 'danger');
+            }
+        });
+
+        assignDepartmentForm.addEventListener('submit', async (e) => {
+            e.preventDefault();
+            const userId = document.getElementById('assignUserId').value;
+            const departmentId = document.getElementById('assignDepartmentId').value;
+            const payload = `user_id=${userId}&department_id=${departmentId}`;
+
+            try {
+                const response = await fetch('http://127.0.0.1:8080/assign-department', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                    body: payload
+                });
+                const data = await response.json();
+                showMessage(data.message, data.success ? 'success' : 'danger');
+                if (data.success) {
+                    assignDepartmentForm.reset();
+                }
+            } catch (error) {
+                showMessage('Error assigning department', 'danger');
+            }
+        });
+
+        loadJoinBtn.addEventListener('click', async () => {
+            try {
+                const response = await fetch('http://127.0.0.1:8080/join/users-departments');
+                const rows = await response.json();
+                joinTableBody.innerHTML = rows.map(r => `
+                    <tr>
+                        <td>${r.id}</td>
+                        <td>${r.name}</td>
+                        <td>${r.email}</td>
+                        <td>${r.age}</td>
+                        <td>${r.department_id}</td>
+                        <td>${r.department_name}</td>
+                    </tr>
+                `).join('');
+            } catch (error) {
+                showMessage('Error loading join data', 'danger');
             }
         });
     </script>
