@@ -142,6 +142,19 @@
             </div>
         </div>
 
+        <!-- SQL Console -->
+        <div class="card mb-4 border-primary">
+            <div class="card-header bg-primary text-white">SQL Console (C Engine + Cache)</div>
+            <div class="card-body">
+                <textarea id="sqlQuery" class="form-control mb-2" rows="5">SELECT * FROM users;</textarea>
+                <div class="d-flex gap-2 mb-3">
+                    <button id="runSqlBtn" class="btn btn-primary">Run SQL</button>
+                    <button id="fillSqlExamplesBtn" class="btn btn-outline-primary">Load Examples</button>
+                </div>
+                <pre id="sqlResult" class="bg-light border rounded p-3" style="max-height: 300px; overflow: auto;"></pre>
+            </div>
+        </div>
+
         <!-- Messages -->
         <div id="messages"></div>
     </div>
@@ -156,6 +169,10 @@
         const departmentsList = document.getElementById('departmentsList');
         const assignDepartmentForm = document.getElementById('assignDepartmentForm');
         const loadJoinBtn = document.getElementById('loadJoinBtn');
+        const runSqlBtn = document.getElementById('runSqlBtn');
+        const fillSqlExamplesBtn = document.getElementById('fillSqlExamplesBtn');
+        const sqlQuery = document.getElementById('sqlQuery');
+        const sqlResult = document.getElementById('sqlResult');
         const joinTableBody = document.querySelector('#joinTable tbody');
         const recordsTableBody = document.querySelector('#recordsTable tbody');
         const selectedRecordDiv = document.getElementById('selectedRecord');
@@ -316,6 +333,42 @@
             } catch (error) {
                 showMessage('Error loading join data', 'danger');
             }
+        });
+
+        runSqlBtn.addEventListener('click', async () => {
+            const query = sqlQuery.value.trim();
+            if (!query) {
+                showMessage('Write a SQL query first', 'warning');
+                return;
+            }
+
+            try {
+                const payload = `query=${encodeURIComponent(query)}`;
+                const response = await fetch('http://127.0.0.1:8080/sql', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                    body: payload
+                });
+
+                const data = await response.json();
+                sqlResult.textContent = JSON.stringify(data, null, 2);
+                showMessage(data.success ? `SQL executed (cached=${data.cached})` : data.message, data.success ? 'success' : 'danger');
+            } catch (error) {
+                showMessage('Error executing SQL', 'danger');
+            }
+        });
+
+        fillSqlExamplesBtn.addEventListener('click', () => {
+            sqlQuery.value = [
+                "SELECT * FROM users;",
+                "SELECT * FROM users WHERE id = 1;",
+                "SELECT * FROM departments;",
+                "SELECT * FROM users_departments;",
+                "INSERT INTO departments VALUES (20,'Sales');",
+                "INSERT INTO users VALUES (900,'SQL User','sql@example.com',34,20);",
+                "UPDATE users SET department_id = 20 WHERE id = 900;",
+                "DELETE FROM users WHERE id = 900;"
+            ].join('\n');
         });
     </script>
 </body>

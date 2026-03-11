@@ -13,6 +13,9 @@
 #define USERS_DB_FILE "users.db"
 #define DEPARTMENTS_DB_FILE "departments.db"
 #define BTREE_T 3
+#define MAX_SQL_QUERY_LEN 512
+#define MAX_SQL_RESULT_LEN 32768
+#define MAX_CACHE_ENTRIES 16
 
 int ids[MAX_RECORDS];
 char names[MAX_RECORDS][50];
@@ -44,6 +47,16 @@ typedef struct {
     char value[100];
 } Param;
 
+typedef struct {
+    int valid;
+    char query[MAX_SQL_QUERY_LEN];
+    char result[MAX_SQL_RESULT_LEN];
+    unsigned long long stamp;
+} QueryCacheEntry;
+
+QueryCacheEntry query_cache[MAX_CACHE_ENTRIES];
+unsigned long long cache_clock = 0;
+
 void save_users_database();
 void load_users_database();
 void save_departments_database();
@@ -63,6 +76,352 @@ void btree_split_child(BTreeNode* parent, int child_index);
 void btree_insert_nonfull(BTreeNode* node, int key, int value);
 void btree_insert(int key, int value);
 void rebuild_user_index();
+void trim_inplace(char* s);
+void strip_trailing_semicolon(char* s);
+int starts_with_ci(const char* text, const char* prefix);
+int streq_ci(const char* a, const char* b);
+void to_upper_copy(const char* src, char* dst, size_t dst_size);
+int execute_sql_statement(const char* sql, char* result_json, size_t result_size, int* is_select, int* changed_data, char* error_msg, size_t error_size);
+int cache_get(const char* query, char* out_result, size_t out_size);
+void cache_put(const char* query, const char* result);
+void cache_invalidate_all();
+
+void trim_inplace(char* s) {
+    size_t len;
+    char* start = s;
+    while (*start && isspace((unsigned char)*start)) start++;
+    if (start != s) memmove(s, start, strlen(start) + 1);
+
+    len = strlen(s);
+    while (len > 0 && isspace((unsigned char)s[len - 1])) {
+        s[len - 1] = '\0';
+        len--;
+    }
+}
+
+void strip_trailing_semicolon(char* s) {
+    size_t len = strlen(s);
+    while (len > 0 && isspace((unsigned char)s[len - 1])) {
+        s[len - 1] = '\0';
+        len--;
+    }
+    if (len > 0 && s[len - 1] == ';') {
+        s[len - 1] = '\0';
+    }
+    trim_inplace(s);
+}
+
+int starts_with_ci(const char* text, const char* prefix) {
+    while (*prefix) {
+        if (toupper((unsigned char)*text) != toupper((unsigned char)*prefix)) {
+            return 0;
+        }
+        text++;
+        prefix++;
+    }
+    return 1;
+}
+
+int streq_ci(const char* a, const char* b) {
+    while (*a && *b) {
+        if (toupper((unsigned char)*a) != toupper((unsigned char)*b)) {
+            return 0;
+        }
+        a++;
+        b++;
+    }
+    return *a == '\0' && *b == '\0';
+}
+
+void to_upper_copy(const char* src, char* dst, size_t dst_size) {
+    size_t i = 0;
+    if (dst_size == 0) return;
+    while (src[i] && i < dst_size - 1) {
+        dst[i] = (char)toupper((unsigned char)src[i]);
+        i++;
+    }
+    dst[i] = '\0';
+}
+
+int cache_get(const char* query, char* out_result, size_t out_size) {
+    unsigned long long newest_stamp = 0;
+    int match = -1;
+    for (int i = 0; i < MAX_CACHE_ENTRIES; i++) {
+        if (query_cache[i].valid && strcmp(query_cache[i].query, query) == 0) {
+            if (query_cache[i].stamp >= newest_stamp) {
+                newest_stamp = query_cache[i].stamp;
+                match = i;
+            }
+        }
+    }
+    if (match < 0) return 0;
+
+    strncpy(out_result, query_cache[match].result, out_size - 1);
+    out_result[out_size - 1] = '\0';
+    query_cache[match].stamp = ++cache_clock;
+    return 1;
+}
+
+void cache_put(const char* query, const char* result) {
+    int target = -1;
+    unsigned long long oldest_stamp = 0;
+
+    for (int i = 0; i < MAX_CACHE_ENTRIES; i++) {
+        if (!query_cache[i].valid) {
+            target = i;
+            break;
+        }
+    }
+
+    if (target < 0) {
+        oldest_stamp = query_cache[0].stamp;
+        target = 0;
+        for (int i = 1; i < MAX_CACHE_ENTRIES; i++) {
+            if (query_cache[i].stamp < oldest_stamp) {
+                oldest_stamp = query_cache[i].stamp;
+                target = i;
+            }
+        }
+    }
+
+    query_cache[target].valid = 1;
+    query_cache[target].stamp = ++cache_clock;
+    strncpy(query_cache[target].query, query, sizeof(query_cache[target].query) - 1);
+    query_cache[target].query[sizeof(query_cache[target].query) - 1] = '\0';
+    strncpy(query_cache[target].result, result, sizeof(query_cache[target].result) - 1);
+    query_cache[target].result[sizeof(query_cache[target].result) - 1] = '\0';
+}
+
+void cache_invalidate_all() {
+    for (int i = 0; i < MAX_CACHE_ENTRIES; i++) {
+        query_cache[i].valid = 0;
+        query_cache[i].query[0] = '\0';
+        query_cache[i].result[0] = '\0';
+        query_cache[i].stamp = 0;
+    }
+}
+
+int execute_sql_statement(const char* sql, char* result_json, size_t result_size, int* is_select, int* changed_data, char* error_msg, size_t error_size) {
+    char sql_local[MAX_SQL_QUERY_LEN];
+    char sql_upper[MAX_SQL_QUERY_LEN];
+    int parsed;
+
+    *is_select = 0;
+    *changed_data = 0;
+    error_msg[0] = '\0';
+    (void)result_size;
+
+    strncpy(sql_local, sql, sizeof(sql_local) - 1);
+    sql_local[sizeof(sql_local) - 1] = '\0';
+    trim_inplace(sql_local);
+    strip_trailing_semicolon(sql_local);
+    to_upper_copy(sql_local, sql_upper, sizeof(sql_upper));
+
+    if (streq_ci(sql_upper, "SELECT * FROM USERS")) {
+        *is_select = 1;
+        strcpy(result_json, "[");
+        EnterCriticalSection(&db_critical_section);
+        for (int i = 0; i < record_count; i++) {
+            char row[256];
+            sprintf(row, "{\"id\":%d,\"name\":\"%s\",\"email\":\"%s\",\"age\":%d,\"department_id\":%d}",
+                ids[i], names[i], emails[i], ages[i], department_ids[i]);
+            strcat(result_json, row);
+            if (i < record_count - 1) strcat(result_json, ",");
+        }
+        LeaveCriticalSection(&db_critical_section);
+        strcat(result_json, "]");
+        return 1;
+    }
+
+    if (starts_with_ci(sql_upper, "SELECT * FROM USERS WHERE ID =")) {
+        int id;
+        *is_select = 1;
+        parsed = sscanf(sql_upper, "SELECT * FROM USERS WHERE ID = %d", &id);
+        if (parsed != 1) {
+            strncpy(error_msg, "Invalid SELECT WHERE syntax", error_size - 1);
+            error_msg[error_size - 1] = '\0';
+            return 0;
+        }
+        EnterCriticalSection(&db_critical_section);
+        int idx = find_user_index_by_id(id);
+        if (idx >= 0) {
+            sprintf(result_json, "{\"id\":%d,\"name\":\"%s\",\"email\":\"%s\",\"age\":%d,\"department_id\":%d}",
+                ids[idx], names[idx], emails[idx], ages[idx], department_ids[idx]);
+        } else {
+            strcpy(result_json, "{\"error\":\"Not found\"}");
+        }
+        LeaveCriticalSection(&db_critical_section);
+        return 1;
+    }
+
+    if (streq_ci(sql_upper, "SELECT * FROM DEPARTMENTS")) {
+        *is_select = 1;
+        strcpy(result_json, "[");
+        EnterCriticalSection(&db_critical_section);
+        for (int i = 0; i < dept_count; i++) {
+            char row[128];
+            sprintf(row, "{\"id\":%d,\"name\":\"%s\"}", dept_ids[i], dept_names[i]);
+            strcat(result_json, row);
+            if (i < dept_count - 1) strcat(result_json, ",");
+        }
+        LeaveCriticalSection(&db_critical_section);
+        strcat(result_json, "]");
+        return 1;
+    }
+
+    if (streq_ci(sql_upper, "SELECT * FROM USERS JOIN DEPARTMENTS ON USERS.DEPARTMENT_ID = DEPARTMENTS.ID") ||
+        streq_ci(sql_upper, "SELECT * FROM USERS_DEPARTMENTS")) {
+        *is_select = 1;
+        strcpy(result_json, "[");
+        EnterCriticalSection(&db_critical_section);
+        for (int i = 0; i < record_count; i++) {
+            int didx = find_department_index_by_id(department_ids[i]);
+            const char* dname = (didx >= 0) ? dept_names[didx] : "UNASSIGNED";
+            char row[320];
+            sprintf(row,
+                "{\"id\":%d,\"name\":\"%s\",\"email\":\"%s\",\"age\":%d,\"department_id\":%d,\"department_name\":\"%s\"}",
+                ids[i], names[i], emails[i], ages[i], department_ids[i], dname);
+            strcat(result_json, row);
+            if (i < record_count - 1) strcat(result_json, ",");
+        }
+        LeaveCriticalSection(&db_critical_section);
+        strcat(result_json, "]");
+        return 1;
+    }
+
+    if (starts_with_ci(sql_upper, "INSERT INTO USERS VALUES")) {
+        int id, age, department_id;
+        char name[50], email[50];
+        char* open_paren = strchr(sql_local, '(');
+        if (!open_paren) {
+            strncpy(error_msg, "Invalid INSERT users syntax", error_size - 1);
+            error_msg[error_size - 1] = '\0';
+            return 0;
+        }
+        parsed = sscanf(open_paren, "(%d,'%49[^']','%49[^']',%d,%d)", &id, name, email, &age, &department_id);
+        if (parsed != 5) {
+            strncpy(error_msg, "Expected: INSERT INTO users VALUES (id,'name','email',age,department_id)", error_size - 1);
+            error_msg[error_size - 1] = '\0';
+            return 0;
+        }
+
+        EnterCriticalSection(&db_critical_section);
+        if (find_user_index_by_id(id) >= 0 || record_count >= MAX_RECORDS) {
+            LeaveCriticalSection(&db_critical_section);
+            strncpy(error_msg, "User id exists or users table full", error_size - 1);
+            error_msg[error_size - 1] = '\0';
+            return 0;
+        }
+        insert_record(id, name, email, age, department_id);
+        LeaveCriticalSection(&db_critical_section);
+
+        *changed_data = 1;
+        strcpy(result_json, "{\"success\":true,\"message\":\"User inserted\"}");
+        return 1;
+    }
+
+    if (starts_with_ci(sql_upper, "INSERT INTO DEPARTMENTS VALUES")) {
+        int id;
+        char name[50];
+        char* open_paren = strchr(sql_local, '(');
+        if (!open_paren) {
+            strncpy(error_msg, "Invalid INSERT departments syntax", error_size - 1);
+            error_msg[error_size - 1] = '\0';
+            return 0;
+        }
+        parsed = sscanf(open_paren, "(%d,'%49[^']')", &id, name);
+        if (parsed != 2) {
+            strncpy(error_msg, "Expected: INSERT INTO departments VALUES (id,'name')", error_size - 1);
+            error_msg[error_size - 1] = '\0';
+            return 0;
+        }
+
+        upsert_department(id, name);
+        *changed_data = 1;
+        strcpy(result_json, "{\"success\":true,\"message\":\"Department saved\"}");
+        return 1;
+    }
+
+    if (starts_with_ci(sql_upper, "UPDATE USERS SET DEPARTMENT_ID =")) {
+        int department_id, user_id;
+        parsed = sscanf(sql_upper, "UPDATE USERS SET DEPARTMENT_ID = %d WHERE ID = %d", &department_id, &user_id);
+        if (parsed != 2) {
+            strncpy(error_msg, "Expected: UPDATE users SET department_id = N WHERE id = M", error_size - 1);
+            error_msg[error_size - 1] = '\0';
+            return 0;
+        }
+
+        EnterCriticalSection(&db_critical_section);
+        int uidx = find_user_index_by_id(user_id);
+        int didx = find_department_index_by_id(department_id);
+        if (uidx < 0 || didx < 0) {
+            LeaveCriticalSection(&db_critical_section);
+            strncpy(error_msg, "User or department not found", error_size - 1);
+            error_msg[error_size - 1] = '\0';
+            return 0;
+        }
+
+        department_ids[uidx] = department_id;
+        save_users_database();
+        LeaveCriticalSection(&db_critical_section);
+
+        *changed_data = 1;
+        strcpy(result_json, "{\"success\":true,\"message\":\"User updated\"}");
+        return 1;
+    }
+
+    if (starts_with_ci(sql_upper, "DELETE FROM USERS WHERE ID =")) {
+        int id;
+        parsed = sscanf(sql_upper, "DELETE FROM USERS WHERE ID = %d", &id);
+        if (parsed != 1) {
+            strncpy(error_msg, "Expected: DELETE FROM users WHERE id = N", error_size - 1);
+            error_msg[error_size - 1] = '\0';
+            return 0;
+        }
+
+        EnterCriticalSection(&db_critical_section);
+        if (find_user_index_by_id(id) < 0) {
+            LeaveCriticalSection(&db_critical_section);
+            strncpy(error_msg, "User not found", error_size - 1);
+            error_msg[error_size - 1] = '\0';
+            return 0;
+        }
+        delete_record(id);
+        LeaveCriticalSection(&db_critical_section);
+
+        *changed_data = 1;
+        strcpy(result_json, "{\"success\":true,\"message\":\"User deleted\"}");
+        return 1;
+    }
+
+    if (starts_with_ci(sql_upper, "DELETE FROM DEPARTMENTS WHERE ID =")) {
+        int id;
+        parsed = sscanf(sql_upper, "DELETE FROM DEPARTMENTS WHERE ID = %d", &id);
+        if (parsed != 1) {
+            strncpy(error_msg, "Expected: DELETE FROM departments WHERE id = N", error_size - 1);
+            error_msg[error_size - 1] = '\0';
+            return 0;
+        }
+
+        EnterCriticalSection(&db_critical_section);
+        if (find_department_index_by_id(id) < 0) {
+            LeaveCriticalSection(&db_critical_section);
+            strncpy(error_msg, "Department not found", error_size - 1);
+            error_msg[error_size - 1] = '\0';
+            return 0;
+        }
+        delete_department(id);
+        LeaveCriticalSection(&db_critical_section);
+
+        *changed_data = 1;
+        strcpy(result_json, "{\"success\":true,\"message\":\"Department deleted\"}");
+        return 1;
+    }
+
+    strncpy(error_msg, "Unsupported SQL statement", error_size - 1);
+    error_msg[error_size - 1] = '\0';
+    return 0;
+}
 
 void url_decode(char* dst, const char* src) {
     while (*src) {
@@ -159,6 +518,66 @@ char* handle_request(char* request) {
             LeaveCriticalSection(&db_critical_section);
         } else {
             strcpy(response, "HTTP/1.1 404 Not Found\r\nAccess-Control-Allow-Origin: *\r\n\r\n");
+        }
+    } else if (strcmp(method, "POST") == 0 && strcmp(path, "/sql") == 0) {
+        char* cl = strstr(request, "Content-Length:");
+        if (cl) {
+            char* body = strstr(request, "\r\n\r\n") + 4;
+            Param params[10];
+            int n = parse_query(body, params, 10);
+            char sql_query[MAX_SQL_QUERY_LEN] = "";
+
+            for (int i = 0; i < n; i++) {
+                if (strcmp(params[i].key, "query") == 0) {
+                    strncpy(sql_query, params[i].value, sizeof(sql_query) - 1);
+                    sql_query[sizeof(sql_query) - 1] = '\0';
+                }
+            }
+
+            if (!sql_query[0]) {
+                strcpy(response, "HTTP/1.1 400 Bad Request\r\nAccess-Control-Allow-Origin: *\r\nContent-Type: application/json\r\n\r\n{\"success\":false,\"message\":\"Missing query\"}");
+            } else {
+                char sql_result[MAX_SQL_RESULT_LEN];
+                char err[256];
+                int is_select = 0;
+                int changed_data = 0;
+
+                trim_inplace(sql_query);
+                strip_trailing_semicolon(sql_query);
+
+                EnterCriticalSection(&db_critical_section);
+                if (starts_with_ci(sql_query, "SELECT")) {
+                    if (cache_get(sql_query, sql_result, sizeof(sql_result))) {
+                        LeaveCriticalSection(&db_critical_section);
+                        sprintf(response,
+                            "HTTP/1.1 200 OK\r\nAccess-Control-Allow-Origin: *\r\nContent-Type: application/json\r\n\r\n{\"success\":true,\"cached\":true,\"result\":%s}",
+                            sql_result);
+                        return response;
+                    }
+                }
+                LeaveCriticalSection(&db_critical_section);
+
+                if (execute_sql_statement(sql_query, sql_result, sizeof(sql_result), &is_select, &changed_data, err, sizeof(err))) {
+                    EnterCriticalSection(&db_critical_section);
+                    if (is_select) {
+                        cache_put(sql_query, sql_result);
+                    }
+                    if (changed_data) {
+                        cache_invalidate_all();
+                    }
+                    LeaveCriticalSection(&db_critical_section);
+
+                    sprintf(response,
+                        "HTTP/1.1 200 OK\r\nAccess-Control-Allow-Origin: *\r\nContent-Type: application/json\r\n\r\n{\"success\":true,\"cached\":false,\"result\":%s}",
+                        sql_result);
+                } else {
+                    sprintf(response,
+                        "HTTP/1.1 400 Bad Request\r\nAccess-Control-Allow-Origin: *\r\nContent-Type: application/json\r\n\r\n{\"success\":false,\"message\":\"%s\"}",
+                        err);
+                }
+            }
+        } else {
+            strcpy(response, "HTTP/1.1 400 Bad Request\r\nAccess-Control-Allow-Origin: *\r\n\r\n");
         }
     } else if (strcmp(method, "POST") == 0 && strcmp(path, "/insert") == 0) {
         char* cl = strstr(request, "Content-Length:");
@@ -565,6 +984,7 @@ int main() {
     load_users_database();
     load_departments_database();
     rebuild_user_index();
+    cache_invalidate_all();
 
     WSADATA wsaData;
     if (WSAStartup(MAKEWORD(2,2), &wsaData) != 0) {
